@@ -1,4 +1,4 @@
-"""WORLD WAR REBIRTH entrypoint — correct python-bale-bot 2.x lifecycle."""
+"""WORLD WAR REBIRTH entrypoint — same lifecycle as legacy WORLD-WAR (python-bale-bot 2.5.0)."""
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +12,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("rebirth")
 
-for name in ("httpx", "httpcore", "asyncio", "aiohttp"):
+for name in ("httpx", "httpcore", "asyncio", "aiohttp", "bale.request"):
     logging.getLogger(name).setLevel(logging.WARNING)
 
 
@@ -20,16 +20,20 @@ def load_settings():
     try:
         import config as cfg
     except ImportError:
-        log.error("config.py missing — copy from config.example.py")
+        log.error(
+            "فایل config.py پیدا نشد.\n"
+            "کپی کنید: cp config.example.py config.py\n"
+            "سپس BALE_TOKEN و OWNER_ID را در config.py پر کنید."
+        )
         sys.exit(1)
     return cfg
 
 
 async def async_main() -> None:
     settings = load_settings()
-    token = (getattr(settings, "BALE_TOKEN", None) or "").strip()
+    token = (getattr(settings, "BALE_TOKEN", None) or getattr(settings, "BOT_TOKEN", None) or "").strip()
     if not token:
-        log.error("BALE_TOKEN empty in config.py")
+        log.error("BALE_TOKEN در config.py خالی است.")
         sys.exit(1)
 
     from bale import Bot
@@ -42,7 +46,11 @@ async def async_main() -> None:
     db = await create_database(db_path)
     world = World(db, settings)
     await world.bootstrap()
-    log.info("World ready version=%s owner_id=%s", getattr(settings, "BOT_VERSION", ""), world.owner_id)
+    log.info(
+        "World ready version=%s owner_id=%s",
+        getattr(settings, "BOT_VERSION", "2.0.0-rebirth"),
+        world.owner_id,
+    )
 
     bot = Bot(token)
     register_handlers(bot, world)
@@ -72,51 +80,38 @@ async def async_main() -> None:
                 log.exception("background loop")
             await asyncio.sleep(60)
 
-    bg_task = asyncio.create_task(background(), name="rebirth-background")
+    bg = asyncio.create_task(background(), name="rebirth-background")
 
-    # Official lifecycle (python-bale-bot 2.x):
-    # async with bot -> HTTP start
-    # get_me -> auth
-    # updater.setup + fetcher + start_polling -> receive updates
-    # Handlers must be MessageHandler / BaseHandler — NOT listen("message")
+    # Exact legacy WORLD-WAR lifecycle for python-bale-bot 2.5.0:
+    # async with bot:  -> HTTP start
+    # await bot.connect() -> get_me() + updater.start() (polling forever)
     try:
-        log.info("Connection starting (HTTP + getMe + polling)…")
+        log.info("Starting bot.connect() REBIRTH %s", getattr(settings, "BOT_VERSION", ""))
         async with bot:
             me = await bot.get_me()
-            uname = getattr(me, "username", None)
-            uid = getattr(me, "user_id", None) or getattr(me, "id", None)
-            log.info("Authentication successful bot=@%s id=%s", uname, uid)
-
-            await bot.updater.setup()
-            # Start queue consumer that process_update -> handlers
-            asyncio.create_task(bot._updater_fetcher_wrapper(), name="Bot:updater_fetcher")
-            log.info("Update receiver started")
-
-            await bot.updater.start_polling()
-            log.info("Polling worker running — bot is live. Send /start in private chat.")
-
-            # start_polling returns after scheduling worker; keep process alive
-            stop = asyncio.Event()
-            try:
-                await stop.wait()
-            except asyncio.CancelledError:
-                raise
+            log.info(
+                "Authentication successful bot=@%s id=%s",
+                getattr(me, "username", None),
+                getattr(me, "user_id", None) or getattr(me, "id", None),
+            )
+            # connect = get_me + updater.start (blocks on polling)
+            await bot.updater.start()
     except KeyboardInterrupt:
-        log.info("KeyboardInterrupt — shutting down")
+        log.info("KeyboardInterrupt")
     except Exception:
-        log.exception("Bot connection / polling failed")
+        log.exception("Bot connection failed")
         raise
     finally:
-        bg_task.cancel()
+        bg.cancel()
         try:
-            await bg_task
+            await bg
         except Exception:
             pass
         try:
-            if bot.updater and getattr(bot.updater, "_running", False):
+            if getattr(bot.updater, "running", False):
                 await bot.updater.stop()
         except Exception:
-            log.exception("updater stop")
+            pass
         await db.close()
         log.info("Shutdown complete")
 

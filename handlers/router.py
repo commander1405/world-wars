@@ -1,11 +1,8 @@
-"""Bale handlers for WORLD WAR REBIRTH — uses official MessageHandler / custom callback handler."""
+"""Bale event handlers for WORLD WAR REBIRTH — python-bale-bot 2.5.0 API only."""
 from __future__ import annotations
 
 import logging
-from typing import Optional, Tuple, TYPE_CHECKING
-
-from bale import Message, CallbackQuery, Update
-from bale.handlers import MessageHandler, BaseHandler
+from datetime import datetime, timezone
 
 from core.errors import GameError
 from core.world import World
@@ -16,21 +13,9 @@ from keyboards.main import (
 )
 from modules.shop.catalog import CAT_FA, items_in_category
 
-if TYPE_CHECKING:
-    from bale import Bot
-
 log = logging.getLogger(__name__)
 _pending: dict[int, dict] = {}
 _busy: set[int] = set()
-
-
-class AnyCallbackHandler(BaseHandler):
-    """Library CallbackQueryHandler ignores updates when check is None — custom fix."""
-
-    async def check_new_update(self, update: "Update") -> Optional[Tuple["CallbackQuery"]]:
-        if update.callback_query is not None:
-            return (update.callback_query,)
-        return None
 
 
 def _uid(obj) -> int | None:
@@ -44,6 +29,22 @@ def _uid(obj) -> int | None:
         return None
 
 
+def _text(m) -> str:
+    t = getattr(m, "content", None)
+    if t is None:
+        t = getattr(m, "text", None)
+    return str(t or "").strip()
+
+
+def _names(m):
+    u = getattr(m, "author", None) or getattr(m, "from_user", None)
+    if not u:
+        return None, None
+    un = getattr(u, "username", None)
+    dn = f"{getattr(u, 'first_name', None) or ''} {getattr(u, 'last_name', None) or ''}".strip() or None
+    return un, dn
+
+
 def _is_private(message) -> bool:
     chat = getattr(message, "chat", None)
     if not chat:
@@ -52,59 +53,60 @@ def _is_private(message) -> bool:
     return "private" in t or t in ("1", "prv")
 
 
-async def reply(message, text: str, components=None):
+async def reply(msg, text, kb=None):
     try:
-        if components is not None:
-            await message.reply(str(text)[:3500], components=components)
-        else:
-            await message.reply(str(text)[:3500])
+        await msg.reply(str(text)[:3500], components=kb)
     except Exception:
         log.exception("reply failed")
 
 
-def register_handlers(bot: "Bot", world: World) -> None:
-    """Register using official handler API (not listen('message'))."""
+def _fa_num(s: str) -> str:
+    return str(s).translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))
 
-    @bot.handle(MessageHandler())
-    async def on_message(message: Message):
-        try:
-            pid = _uid(message)
-            log.info("Handler executed: message pid=%s", pid)
-            await _on_message(bot, world, message)
-        except Exception:
-            log.exception("on_message")
 
-    @bot.handle(AnyCallbackHandler())
-    async def on_callback(callback: CallbackQuery):
-        try:
-            pid = _uid(callback)
-            data = getattr(callback, "data", None) or ""
-            log.info("Handler executed: callback pid=%s data=%s", pid, str(data)[:48])
-            await _on_callback(bot, world, callback)
-        except Exception:
-            log.exception("on_callback")
+def register_handlers(bot, world: World) -> None:
+    """Register events the same way as legacy WORLD-WAR (python-bale-bot 2.5.0)."""
 
     @bot.listen("on_ready")
     async def on_ready():
         u = bot.user
-        log.info("Authentication successful: @%s id=%s", getattr(u, "username", None), getattr(u, "user_id", None) or getattr(u, "id", None))
+        log.info(
+            "NG UI ready bot=@%s id=%s",
+            getattr(u, "username", None),
+            getattr(u, "user_id", None) or getattr(u, "id", None),
+        )
 
-    log.info("Handlers registered: MessageHandler + CallbackHandler + on_ready")
+    @bot.listen("on_message")
+    async def on_message(message):
+        try:
+            text = _text(message)
+            if not text:
+                return
+            pid = _uid(message)
+            if not pid:
+                return
+            log.info("on_message pid=%s private=%s text=%s", pid, _is_private(message), text[:40])
+            await _on_message(bot, world, message, pid, text)
+        except Exception:
+            log.exception("on_message")
+
+    @bot.listen("on_callback")
+    async def on_callback(callback):
+        try:
+            pid = _uid(callback)
+            data = str(getattr(callback, "data", None) or "")
+            log.info("on_callback pid=%s data=%s", pid, data[:48])
+            await _on_callback(bot, world, callback, pid, data)
+        except Exception:
+            log.exception("on_callback")
+
+    log.info("handlers registered: on_ready, on_message, on_callback")
 
 
-async def _on_message(bot, world: World, message: Message):
-    pid = _uid(message)
-    if not pid:
-        return
-    text = (getattr(message, "text", None) or "").strip()
-    if not text:
-        return
-
+async def _on_message(bot, world: World, message, pid: int, text: str):
     private = _is_private(message)
     owner = world.is_owner(pid)
-    author = getattr(message, "author", None) or getattr(message, "from_user", None)
-    uname = getattr(author, "username", None) if author else None
-    dname = getattr(author, "first_name", None) or getattr(author, "name", None) if author else None
+    uname, dname = _names(message)
     await world.touch_player(pid, uname, dname)
 
     if not private:
@@ -112,7 +114,6 @@ async def _on_message(bot, world: World, message: Message):
             await reply(message, "برای بازی به پیوی ربات مراجعه کنید.")
         return
 
-    # ---------- pending text states ----------
     if pid in _pending:
         st = _pending[pid]
         kind = st.get("kind")
@@ -122,7 +123,7 @@ async def _on_message(bot, world: World, message: Message):
             return
         try:
             if kind == "donation_amount":
-                amount = float(text.replace(",", "").replace(" ", "").translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")))
+                amount = float(_fa_num(text).replace(",", "").replace(" ", ""))
                 if amount < 1000:
                     await reply(message, "حداقل ۱۰۰۰ تومان")
                     return
@@ -140,7 +141,7 @@ async def _on_message(bot, world: World, message: Message):
                         log.exception("notify owner donation")
                 return
             if kind == "buy_qty":
-                qty = float(text.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")))
+                qty = float(_fa_num(text).replace(",", ""))
                 msg = await world.buy_item(pid, st["item"], qty)
                 _pending.pop(pid, None)
                 await reply(message, msg, main_kb(owner))
@@ -150,18 +151,18 @@ async def _on_message(bot, world: World, message: Message):
                 await reply(message, "ظرفیت اعضا (۲ تا ۲۰):")
                 return
             if kind == "ally_caps":
-                cap = int(float(text.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))))
+                cap = int(float(_fa_num(text)))
                 _pending[pid] = {"kind": "ally_treasury", "name": st["name"], "cap": cap}
                 await reply(message, "ظرفیت خزانه (تومان):")
                 return
             if kind == "ally_treasury":
-                treas = float(text.replace(",", "").translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")))
+                treas = float(_fa_num(text).replace(",", ""))
                 a = await world.alliances.create(pid, st["name"], st["cap"], treas)
                 _pending.pop(pid, None)
                 await reply(message, f"✅ اتحاد «{a['name']}» ساخته شد.", main_kb(owner))
                 return
             if kind == "ally_deposit":
-                amount = float(text.replace(",", "").translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")))
+                amount = float(_fa_num(text).replace(",", ""))
                 msg = await world.alliances.deposit(pid, amount)
                 _pending.pop(pid, None)
                 await reply(message, msg, main_kb(owner))
@@ -172,13 +173,13 @@ async def _on_message(bot, world: World, message: Message):
                 await reply(message, msg, main_kb(owner))
                 return
             if kind == "mkt_price":
-                price = float(text.replace(",", "").translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")))
+                price = float(_fa_num(text).replace(",", ""))
                 L = await world.market.create(pid, st["item"], st["qty"], price)
                 _pending.pop(pid, None)
                 await reply(message, f"✅ آگهی #{L['id']} ثبت شد.", main_kb(owner))
                 return
             if kind == "mkt_qty":
-                qty = float(text.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")))
+                qty = float(_fa_num(text).replace(",", ""))
                 _pending[pid] = {"kind": "mkt_price", "item": st["item"], "qty": qty}
                 await reply(message, "قیمت هر واحد (تومان):")
                 return
@@ -193,7 +194,7 @@ async def _on_message(bot, world: World, message: Message):
                     return
                 parts = text.split()
                 tid = int(parts[0])
-                amount = float(parts[1].replace(",", ""))
+                amount = float(_fa_num(parts[1]).replace(",", ""))
                 row = await world.db.fetchrow(
                     "SELECT country_code, treasury FROM countries WHERE owner_player_id=$1", (tid,)
                 )
@@ -215,7 +216,6 @@ async def _on_message(bot, world: World, message: Message):
             await reply(message, f"❌ {e}")
             return
 
-    # ---------- menus ----------
     if text.startswith("/start") or text in ("شروع", "منو", "menu", BTN_HOME):
         await world.nav.clear(pid)
         start = await world.get_setting("start_message")
@@ -392,7 +392,6 @@ async def _on_message(bot, world: World, message: Message):
 
 
 async def _submit_donation(world, pid, amount, uname, dname) -> int:
-    from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
     nid = await world.db.fetchrow("SELECT COALESCE(MAX(id),0)+1 AS id FROM donations")
     did = int(nid["id"])
@@ -406,13 +405,11 @@ async def _submit_donation(world, pid, amount, uname, dname) -> int:
     return did
 
 
-async def _on_callback(bot, world: World, callback):
-    pid = _uid(callback)
+async def _on_callback(bot, world: World, callback, pid: int | None, data: str):
     if not pid:
         return
     if pid in _busy:
         return
-    data = str(getattr(callback, "data", None) or "")
     owner = world.is_owner(pid)
     msg = getattr(callback, "message", None)
 
@@ -431,7 +428,6 @@ async def _on_callback(bot, world: World, callback):
         except Exception:
             log.exception("callback send")
 
-    # answer callback if API exists
     try:
         if hasattr(callback, "answer"):
             await callback.answer()
@@ -685,7 +681,6 @@ async def _on_callback(bot, world: World, callback):
             if not row or row["status"] != "pending":
                 await out("قبلاً بررسی شده")
                 return
-            from datetime import datetime, timezone
             status = "approved" if ok else "rejected"
             await world.db.execute(
                 "UPDATE donations SET status=$1, reviewed_at=$2, reviewed_by=$3 WHERE id=$4 AND status='pending'",

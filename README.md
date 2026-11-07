@@ -57,3 +57,32 @@ Polling worker running — bot is live
 ```
 
 سپس در **پیوی** ربات `/start` بزنید.
+
+## کتابخانه Bale (ثابت)
+
+نسخهٔ الزامی: **python-bale-bot==2.5.0** (همان پروژهٔ WORLD-WAR قدیمی)
+
+رویدادها:
+- `@bot.listen("on_ready")`
+- `@bot.listen("on_message")`
+- `@bot.listen("on_callback")`
+
+چرخه اجرا:
+```python
+async with bot:
+    await bot.get_me()
+    await bot.updater.start()  # polling
+```
+
+**از `bale.handlers` استفاده نکنید** — در 2.5.0 وجود ندارد.
+
+## نصب Termux
+
+```bash
+cd /storage/emulated/0/worldwarbot/world-wars
+git checkout rebirth-v2
+git pull
+pip install -r requirements.txt
+# config.py را بسازید یا از قبل داشته باشید
+python main.py
+```
