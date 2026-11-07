@@ -1,12 +1,14 @@
-"""Bale message/callback router for WORLD WAR REBIRTH."""
+"""Bale handlers for WORLD WAR REBIRTH — uses official MessageHandler / custom callback handler."""
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Optional, Tuple, TYPE_CHECKING
 
-from bale import Message
+from bale import Message, CallbackQuery, Update
+from bale.handlers import MessageHandler, BaseHandler
+
 from core.errors import GameError
-from core.world import World, UN_CODE
+from core.world import World
 from keyboards.main import (
     main_kb, ik, back_home, MAIN_LABELS,
     BTN_COUNTRY, BTN_ECO, BTN_BUILD, BTN_ARMY, BTN_DIPLO, BTN_MARKET,
@@ -14,9 +16,21 @@ from keyboards.main import (
 )
 from modules.shop.catalog import CAT_FA, items_in_category
 
+if TYPE_CHECKING:
+    from bale import Bot
+
 log = logging.getLogger(__name__)
 _pending: dict[int, dict] = {}
 _busy: set[int] = set()
+
+
+class AnyCallbackHandler(BaseHandler):
+    """Library CallbackQueryHandler ignores updates when check is None — custom fix."""
+
+    async def check_new_update(self, update: "Update") -> Optional[Tuple["CallbackQuery"]]:
+        if update.callback_query is not None:
+            return (update.callback_query,)
+        return None
 
 
 def _uid(obj) -> int | None:
@@ -35,7 +49,7 @@ def _is_private(message) -> bool:
     if not chat:
         return True
     t = str(getattr(chat, "type", None) or getattr(chat, "chat_type", None) or "").lower()
-    return t in ("private", "prv", "1", "chattype.private") or "private" in t
+    return "private" in t or t in ("1", "prv")
 
 
 async def reply(message, text: str, components=None):
@@ -48,27 +62,34 @@ async def reply(message, text: str, components=None):
         log.exception("reply failed")
 
 
-def register_handlers(bot, world: World):
-    @bot.listen("message")
+def register_handlers(bot: "Bot", world: World) -> None:
+    """Register using official handler API (not listen('message'))."""
+
+    @bot.handle(MessageHandler())
     async def on_message(message: Message):
         try:
             pid = _uid(message)
-            log.info("message received pid=%s private=%s", pid, _is_private(message))
+            log.info("Handler executed: message pid=%s", pid)
             await _on_message(bot, world, message)
         except Exception:
             log.exception("on_message")
 
-    @bot.listen("callback")
-    async def on_callback(callback):
+    @bot.handle(AnyCallbackHandler())
+    async def on_callback(callback: CallbackQuery):
         try:
             pid = _uid(callback)
             data = getattr(callback, "data", None) or ""
-            log.info("callback received pid=%s data=%s", pid, str(data)[:40])
+            log.info("Handler executed: callback pid=%s data=%s", pid, str(data)[:48])
             await _on_callback(bot, world, callback)
         except Exception:
             log.exception("on_callback")
 
-    log.info("handlers registered (message + callback)")
+    @bot.listen("on_ready")
+    async def on_ready():
+        u = bot.user
+        log.info("Authentication successful: @%s id=%s", getattr(u, "username", None), getattr(u, "user_id", None) or getattr(u, "id", None))
+
+    log.info("Handlers registered: MessageHandler + CallbackHandler + on_ready")
 
 
 async def _on_message(bot, world: World, message: Message):
@@ -87,17 +108,11 @@ async def _on_message(bot, world: World, message: Message):
     await world.touch_player(pid, uname, dname)
 
     if not private:
-        if text in ("/start", "شروع"):
+        if text.startswith("/start") or text in ("شروع",):
             await reply(message, "برای بازی به پیوی ربات مراجعه کنید.")
         return
 
-    # Forced membership notice (soft — API membership check needs bot admin)
-    if text in ("/start", "شروع") and not owner:
-        notice = await world.membership.check_text()
-        if notice:
-            # still allow play; owner configures channels
-            pass
-
+    # ---------- pending text states ----------
     if pid in _pending:
         st = _pending[pid]
         kind = st.get("kind")
@@ -122,7 +137,7 @@ async def _on_message(bot, world: World, message: Message):
                             components=ik([[("✅", f"don:ok:{did}"), ("❌", f"don:no:{did}")]]),
                         )
                     except Exception:
-                        pass
+                        log.exception("notify owner donation")
                 return
             if kind == "buy_qty":
                 qty = float(text.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")))
@@ -132,19 +147,18 @@ async def _on_message(bot, world: World, message: Message):
                 return
             if kind == "ally_name":
                 _pending[pid] = {"kind": "ally_caps", "name": text.strip()[:40]}
-                await reply(message, "ظرفیت اعضا را بنویس (۲ تا ۲۰). مثال: 5")
+                await reply(message, "ظرفیت اعضا (۲ تا ۲۰):")
                 return
             if kind == "ally_caps":
                 cap = int(float(text.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789"))))
                 _pending[pid] = {"kind": "ally_treasury", "name": st["name"], "cap": cap}
-                await reply(message, "ظرفیت خزانه (تومان) را بنویس. مثال: 200000000")
+                await reply(message, "ظرفیت خزانه (تومان):")
                 return
             if kind == "ally_treasury":
                 treas = float(text.replace(",", "").translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")))
                 a = await world.alliances.create(pid, st["name"], st["cap"], treas)
                 _pending.pop(pid, None)
-                cost = world.alliances.create_cost(st["cap"], treas)
-                await reply(message, f"✅ اتحاد «{a['name']}» ساخته شد.\nهزینه ساخت حدود {cost:,}", main_kb(owner))
+                await reply(message, f"✅ اتحاد «{a['name']}» ساخته شد.", main_kb(owner))
                 return
             if kind == "ally_deposit":
                 amount = float(text.replace(",", "").translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")))
@@ -166,13 +180,32 @@ async def _on_message(bot, world: World, message: Message):
             if kind == "mkt_qty":
                 qty = float(text.translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")))
                 _pending[pid] = {"kind": "mkt_price", "item": st["item"], "qty": qty}
-                await reply(message, "قیمت هر واحد (تومان) را بنویس:")
+                await reply(message, "قیمت هر واحد (تومان):")
                 return
             if kind == "peace_target":
-                code = text.strip().upper()
-                msg = await world.peace.propose(pid, code)
+                msg = await world.peace.propose(pid, text.strip().upper())
                 _pending.pop(pid, None)
                 await reply(message, msg, main_kb(owner))
+                return
+            if kind == "give_money":
+                if not owner:
+                    _pending.pop(pid, None)
+                    return
+                parts = text.split()
+                tid = int(parts[0])
+                amount = float(parts[1].replace(",", ""))
+                row = await world.db.fetchrow(
+                    "SELECT country_code, treasury FROM countries WHERE owner_player_id=$1", (tid,)
+                )
+                if not row:
+                    await reply(message, "بازیکن کشور ندارد")
+                    return
+                await world.db.execute(
+                    "UPDATE countries SET treasury=$1 WHERE country_code=$2",
+                    (float(row["treasury"]) + amount, row["country_code"]),
+                )
+                _pending.pop(pid, None)
+                await reply(message, f"✅ {int(amount):,} به {row['country_code']} اضافه شد.", main_kb(True))
                 return
         except GameError as e:
             await reply(message, f"❌ {e}")
@@ -182,12 +215,17 @@ async def _on_message(bot, world: World, message: Message):
             await reply(message, f"❌ {e}")
             return
 
-    if text in ("/start", "شروع", "منو", "menu", BTN_HOME):
+    # ---------- menus ----------
+    if text.startswith("/start") or text in ("شروع", "منو", "menu", BTN_HOME):
         await world.nav.clear(pid)
         start = await world.get_setting("start_message")
         code = await world.resolve_country(pid)
-        extra = f"\nکشور شما: {await world.country_label(code)}" if code else "\nهنوز کشور ندارید — از «انتخاب کشور» استفاده کنید."
-        await reply(message, f"🎮 {getattr(world.settings,'BOT_NAME','WORLD WAR REBIRTH')}\n\n{start}{extra}", main_kb(owner))
+        extra = f"\nکشور شما: {await world.country_label(code)}" if code else "\nهنوز کشور ندارید — «🗺 انتخاب کشور»"
+        await reply(
+            message,
+            f"🎮 {getattr(world.settings, 'BOT_NAME', 'WORLD WAR REBIRTH')}\n\n{start}{extra}",
+            main_kb(owner),
+        )
         return
 
     if text == BTN_PICK:
@@ -196,10 +234,11 @@ async def _on_message(bot, world: World, message: Message):
         if not free:
             await reply(message, "کشور آزادی نیست.", main_kb(owner))
             return
-        rows = []
-        for c in free[:40]:
-            tag = "گروهک" if c.get("entity_type") == "group" else "کشور"
-            rows.append([(f"{c.get('flag','')} {c['name_fa']} ({tag})", f"claim:{c['country_code']}")])
+        rows = [
+            [(f"{c.get('flag', '')} {c['name_fa']} ({'گروهک' if c.get('entity_type') == 'group' else 'کشور'})",
+              f"claim:{c['country_code']}")]
+            for c in free[:40]
+        ]
         rows.append(back_home())
         await reply(message, "🗺 کشور یا گروهک آزاد:", ik(rows))
         return
@@ -212,17 +251,15 @@ async def _on_message(bot, world: World, message: Message):
             return
         c = await world.get_country(code)
         body = (
-            f"🌍 {await world.country_label(code)}\n"
-            f"━━━━━━━━━━━━━━\n"
+            f"🌍 {await world.country_label(code)}\n━━━━━━━━━━━━━━\n"
             f"💰 خزانه: {int(float(c['treasury'])):,} تومان\n"
             f"❤️ سلامت: {int(float(c['hp']))}/{int(float(c['max_hp']))}"
             f"{' ×۲' if int(c.get('double_hp') or 0) else ''}\n"
             f"☢ NPT: {'عضو' if int(c.get('npt_member') or 0) else 'غیرعضو'}\n"
-            f"🏷 نوع: {'گروهک' if c.get('entity_type')=='group' else 'کشور'}"
+            f"🏷 نوع: {'گروهک' if c.get('entity_type') == 'group' else 'کشور'}"
         )
         await reply(message, body, ik([
             [("📦 انبار", "inv:show"), ("🏭 کارگاه", "ws:home")],
-            [("📊 آمار بیشتر", "country:stats")],
             back_home(),
         ]))
         return
@@ -237,9 +274,9 @@ async def _on_message(bot, world: World, message: Message):
         base = int(getattr(world.settings, "BASE_DAILY_INCOME", 20_000_000))
         await reply(
             message,
-            f"💰 اقتصاد و دارایی\nخزانه: {int(float(c['treasury'])):,} تومان\n"
-            f"درآمد پایه روزانه: {base:,}\nدرآمد ساختمان‌ها: {int(float(c.get('daily_income') or 0)):,}",
-            ik([[("📜 تاریخچه فعالیت", "eco:log")], back_home()]),
+            f"💰 اقتصاد\nخزانه: {int(float(c['treasury'])):,} تومان\nدرآمد پایه روزانه: {base:,}\n"
+            f"درآمد ساختمان: {int(float(c.get('daily_income') or 0)):,}",
+            ik([back_home()]),
         )
         return
 
@@ -247,8 +284,7 @@ async def _on_message(bot, world: World, message: Message):
         await world.nav.push(pid, "shop")
         await reply(message, "🛒 بازار و فروشگاه", ik([
             [("🛍 فروشگاه رسمی", "shop:cats")],
-            [("🌐 بازار آزاد (P2P)", "mkt:list")],
-            [("➕ ثبت آگهی", "mkt:sell")],
+            [("🌐 بازار آزاد", "mkt:list"), ("➕ ثبت آگهی", "mkt:sell")],
             back_home(),
         ]))
         return
@@ -258,10 +294,9 @@ async def _on_message(bot, world: World, message: Message):
         war = await world.war_enabled()
         await reply(
             message,
-            f"⚔️ ارتش و امنیت\nوضعیت جنگ جهان: {'🟢 باز' if war else '🔴 بسته'}",
+            f"⚔️ ارتش و امنیت\nجنگ جهان: {'🟢 باز' if war else '🔴 بسته'}",
             ik([
-                [("🎯 لیست اهداف", "atk:list")],
-                [("🛡 نیروهای من", "army:forces")],
+                [("🎯 اهداف", "atk:list"), ("🛡 نیروهای من", "army:forces")],
                 [("📜 تاریخچه جنگ", "atk:hist")],
                 back_home(),
             ]),
@@ -282,17 +317,16 @@ async def _on_message(bot, world: World, message: Message):
         await world.nav.push(pid, "build")
         await reply(message, "🏗 ساخت‌وساز", ik([
             [("⛏ معادن", "shop:cat:mine"), ("🏭 زیرساخت", "shop:cat:infra")],
-            [("🏭 کارگاه پژوهش", "ws:home")],
+            [("🏭 کارگاه", "ws:home")],
             back_home(),
         ]))
         return
 
     if text == BTN_ITEMS:
         await world.nav.push(pid, "items")
-        await reply(message, "🎒 آیتم‌ها و تجهیزات", ik([
-            [("📦 انبار نظامی", "inv:show")],
-            [("✨ آیتم‌های لجندری", "leg:shop")],
-            [("📋 لجندری‌های من", "leg:mine")],
+        await reply(message, "🎒 آیتم‌ها", ik([
+            [("📦 انبار", "inv:show")],
+            [("✨ لجندری فروشگاه", "leg:shop"), ("📋 لجندری من", "leg:mine")],
             back_home(),
         ]))
         return
@@ -301,32 +335,30 @@ async def _on_message(bot, world: World, message: Message):
         rows = await world.db.fetch(
             "SELECT name_fa, treasury, flag FROM countries WHERE owner_player_id IS NOT NULL AND country_code<>'UN' ORDER BY treasury DESC LIMIT 15"
         )
-        lines = ["🏆 ثروتمندترین کشورها:"] + [
-            f"{i}. {r.get('flag','')} {r['name_fa']}: {int(float(r['treasury'])):,}" for i, r in enumerate(rows, 1)
+        lines = ["🏆 ثروتمندترین‌ها:"] + [
+            f"{i}. {r.get('flag', '')} {r['name_fa']}: {int(float(r['treasury'])):,}"
+            for i, r in enumerate(rows, 1)
         ]
         await reply(message, "\n".join(lines) if rows else "داده‌ای نیست.", main_kb(owner))
         return
 
     if text == BTN_NEWS:
         logs = await world.db.fetch("SELECT message FROM activity_log ORDER BY id DESC LIMIT 12")
-        lines = ["📜 آخرین رویدادها:"] + [f"• {r['message'][:120]}" for r in logs]
+        lines = ["📜 رویدادها:"] + [f"• {r['message'][:120]}" for r in logs]
         await reply(message, "\n".join(lines) if logs else "خبری نیست.", main_kb(owner))
         return
 
     if text == BTN_SETTINGS:
         about = await world.get_setting("about_message")
-        await reply(message, f"⚙️ تنظیمات و راهنما\n\n{about}", ik([
-            [("📖 راهنما", "guide:home")],
-            back_home(),
-        ]))
+        await reply(message, f"⚙️ راهنما\n\n{about}", ik([[("📖 راهنما", "guide:home")], back_home()]))
         return
 
     if text == BTN_REF:
         code = await world.referral.get_or_create_code(pid)
         await reply(
             message,
-            f"🎁 سیستم دعوت\nکد شما: `{code}`\n\nدعوت‌شونده ۲ میلیون و شما ۱۵ میلیون (در صورت داشتن کشور) دریافت می‌کنید.",
-            ik([[("وارد کردن کد دعوت", "ref:enter")], back_home()]),
+            f"🎁 دعوت\nکد شما: `{code}`\nدعوت‌شونده ۲٬۰۰۰٬۰۰۰ و دعوت‌کننده ۱۵٬۰۰۰٬۰۰۰ تومان (با کشور).",
+            ik([[("وارد کردن کد", "ref:enter")], back_home()]),
         )
         return
 
@@ -338,7 +370,7 @@ async def _on_message(bot, world: World, message: Message):
         total = await world.get_setting("donations_total", "0")
         await reply(
             message,
-            f"💎 حمایت مالی\n\n{intro}\n\n💳 `{card}`\n👤 {name}\n📊 مجموع تأییدشده: {total}",
+            f"💎 حمایت مالی\n\n{intro}\n\n💳 `{card}`\n👤 {name}\n📊 مجموع: {total}",
             ik([[("✅ ثبت درخواست", "donate:new")], back_home()]),
         )
         return
@@ -348,7 +380,7 @@ async def _on_message(bot, world: World, message: Message):
         await reply(message, "👑 پنل مدیریت", ik([
             [("👥 بازیکنان", "own:players"), ("🌍 جهان", "own:world")],
             [("🟢 جنگ باز", "own:war:1"), ("🔴 جنگ بسته", "own:war:0")],
-            [("💰 درآمد روزانه", "own:daily")],
+            [("💰 درآمد روزانه", "own:daily"), ("💵 دادن پول", "own:give")],
             [("💎 حمایت‌ها", "own:donate")],
             [("⚙️ عضویت اجباری", "own:force")],
             back_home(),
@@ -380,24 +412,31 @@ async def _on_callback(bot, world: World, callback):
         return
     if pid in _busy:
         return
-    data = str(getattr(callback, "data", None) or getattr(callback, "callback_data", None) or "")
+    data = str(getattr(callback, "data", None) or "")
     owner = world.is_owner(pid)
     msg = getattr(callback, "message", None)
 
     async def out(text, components=None):
         try:
-            if msg:
+            if msg is not None:
                 await msg.reply(str(text)[:3500], components=components)
                 return
         except Exception:
-            pass
+            log.exception("callback reply")
         try:
             chat = getattr(msg, "chat", None) if msg else None
             cid = getattr(chat, "id", None) or getattr(chat, "chat_id", None)
             if cid:
                 await bot.send_message(cid, str(text)[:3500], components=components)
         except Exception:
-            log.exception("out")
+            log.exception("callback send")
+
+    # answer callback if API exists
+    try:
+        if hasattr(callback, "answer"):
+            await callback.answer()
+    except Exception:
+        pass
 
     _busy.add(pid)
     try:
@@ -407,20 +446,19 @@ async def _on_callback(bot, world: World, callback):
             return
         if data == "nav:back":
             await world.nav.pop(pid)
-            await out("بازگشت — بخش را از منوی اصلی دوباره باز کنید.", main_kb(owner))
+            await out("بازگشت — بخش را از منوی اصلی باز کنید.", main_kb(owner))
             return
         if data == "nav:pick":
             free = await world.list_free_countries()
-            rows = [[(f"{c.get('flag','')} {c['name_fa']}", f"claim:{c['country_code']}")] for c in free[:40]]
+            rows = [[(f"{c.get('flag', '')} {c['name_fa']}", f"claim:{c['country_code']}")] for c in free[:40]]
             rows.append(back_home())
             await out("انتخاب کشور:", ik(rows))
             return
 
         if data.startswith("claim:"):
-            code = data.split(":", 1)[1]
             try:
-                c = await world.claim(pid, code)
-                await out(f"✅ {c['name_fa']} انتخاب شد.\nسرمایه: {int(float(c['treasury'])):,} تومان", main_kb(owner))
+                c = await world.claim(pid, data.split(":", 1)[1])
+                await out(f"✅ {c['name_fa']}\nسرمایه: {int(float(c['treasury'])):,} تومان", main_kb(owner))
             except GameError as e:
                 await out(f"❌ {e}")
             return
@@ -428,9 +466,10 @@ async def _on_callback(bot, world: World, callback):
         if data == "shop:cats":
             rows, pair = [], []
             for cat, name in CAT_FA.items():
-                pair.append((f"{name}", f"shop:cat:{cat}"))
+                pair.append((name, f"shop:cat:{cat}"))
                 if len(pair) == 2:
-                    rows.append(pair); pair = []
+                    rows.append(pair)
+                    pair = []
             if pair:
                 rows.append(pair)
             rows.append(back_home())
@@ -449,7 +488,8 @@ async def _on_callback(bot, world: World, callback):
             item = data.split(":", 1)[1]
             meta = world._cat.get(item)
             if not meta:
-                await out("نامعتبر"); return
+                await out("نامعتبر")
+                return
             _pending[pid] = {"kind": "buy_qty", "item": item}
             await out(f"خرید {meta.get('name_fa')}\nقیمت واحد: {int(meta['unit_price']):,}\nتعداد را بنویسید:")
             return
@@ -457,31 +497,31 @@ async def _on_callback(bot, world: World, callback):
         if data in ("inv:show", "army:forces"):
             code = await world.resolve_country(pid)
             inv = await world.inventory(code) if code else []
-            lines = []
-            for r in inv[:40]:
-                meta = world._cat.get(r["item_code"], {})
-                lines.append(f"• {meta.get('name_fa', r['item_code'])}: {int(float(r['quantity']))}")
+            lines = [
+                f"• {world._cat.get(r['item_code'], {}).get('name_fa', r['item_code'])}: {int(float(r['quantity']))}"
+                for r in inv[:40]
+            ]
             await out("\n".join(lines) if lines else "انبار خالی است.", ik([back_home()]))
             return
 
         if data == "atk:list":
             if not await world.war_enabled() and not owner:
-                await out("⚠️ جنگ جهان بسته است."); return
+                await out("⚠️ جنگ جهان بسته است.")
+                return
             code = await world.resolve_country(pid)
             targets = await world.db.fetch(
-                "SELECT country_code, name_fa, flag FROM countries WHERE owner_player_id IS NOT NULL AND country_code NOT IN ($1,'UN') AND COALESCE(is_destroyed,0)=0 LIMIT 30",
+                "SELECT country_code, name_fa, flag FROM countries WHERE owner_player_id IS NOT NULL "
+                "AND country_code NOT IN ($1,'UN') AND COALESCE(is_destroyed,0)=0 LIMIT 30",
                 (code or "",),
             )
-            rows = [[(f"{t.get('flag','')} {t['name_fa']}", f"atk:go:{t['country_code']}")] for t in targets]
+            rows = [[(f"{t.get('flag', '')} {t['name_fa']}", f"atk:go:{t['country_code']}")] for t in targets]
             rows.append(back_home())
             await out("هدف حمله:", ik(rows) if targets else ik([back_home()]))
             return
 
         if data.startswith("atk:go:"):
-            target = data.split(":")[-1]
             try:
-                report = await world.combat.attack(pid, target, 1.0)
-                await out(report, ik([back_home()]))
+                await out(await world.combat.attack(pid, data.split(":")[-1], 1.0), ik([back_home()]))
             except GameError as e:
                 await out(f"❌ {e}")
             return
@@ -489,7 +529,7 @@ async def _on_callback(bot, world: World, callback):
         if data == "atk:hist":
             rows = await world.db.fetch("SELECT * FROM wars ORDER BY id DESC LIMIT 10")
             lines = [f"• {r['attacker']} → {r['defender']}: {r.get('report')}" for r in rows]
-            await out("\n".join(lines) if lines else "تاریخچه‌ای نیست.", ik([back_home()]))
+            await out("\n".join(lines) if lines else "خالی", ik([back_home()]))
             return
 
         if data == "ally:create":
@@ -500,27 +540,27 @@ async def _on_callback(bot, world: World, callback):
             code = await world.resolve_country(pid)
             a = await world.alliances.my_alliance(code) if code else None
             if not a:
-                await out("عضو اتحادی نیستید.", ik([[("➕ ساخت", "ally:create")], back_home()])); return
+                await out("عضو اتحاد نیستید.", ik([[("➕ ساخت", "ally:create")], back_home()]))
+                return
             mems = await world.alliances.members(a["id"])
             await out(
                 f"🤝 {a['name']}\nخزانه: {int(float(a['treasury'])):,}/{int(float(a['treasury_cap'])):,}\nاعضا: {len(mems)}/{a['member_cap']}",
                 ik([
-                    [("💵 واریز به خزانه", "ally:deposit"), ("🚪 خروج", "ally:leave")],
-                    [("🗑 انحلال (مالک)", "ally:dissolve")],
+                    [("💵 واریز", "ally:deposit"), ("🚪 خروج", "ally:leave")],
+                    [("🗑 انحلال", "ally:dissolve")],
                     back_home(),
                 ]),
             )
             return
         if data == "ally:list":
             rows = await world.alliances.list_open()
-            kb = [[(f"{r['name']} ({r['id']})", f"ally:join:{r['id']}")] for r in rows[:20]]
+            kb = [[(f"{r['name']} (#{r['id']})", f"ally:join:{r['id']}")] for r in rows[:20]]
             kb.append(back_home())
-            await out("اتحادهای فعال — برای عضویت لمس کنید:", ik(kb))
+            await out("اتحادهای فعال:", ik(kb))
             return
         if data.startswith("ally:join:"):
             try:
-                msg = await world.alliances.join(pid, int(data.split(":")[-1]))
-                await out(msg)
+                await out(await world.alliances.join(pid, int(data.split(":")[-1])))
             except GameError as e:
                 await out(f"❌ {e}")
             return
@@ -538,25 +578,24 @@ async def _on_callback(bot, world: World, callback):
             return
         if data == "ally:deposit":
             _pending[pid] = {"kind": "ally_deposit"}
-            await out("مبلغ واریز به خزانه اتحاد را بنویسید:")
+            await out("مبلغ واریز:")
             return
 
         if data == "peace:menu":
             await out("🕊 پیمان صلح", ik([
-                [("ثبت پیمان (کد کشور)", "peace:new")],
-                [("پیمان‌های من", "peace:list")],
+                [("ثبت پیمان", "peace:new"), ("پیمان‌های من", "peace:list")],
                 back_home(),
             ]))
             return
         if data == "peace:new":
             _pending[pid] = {"kind": "peace_target"}
-            await out("کد کشور طرف مقابل را بنویس (مثل IR):")
+            await out("کد کشور طرف مقابل (مثل IR):")
             return
         if data == "peace:list":
             code = await world.resolve_country(pid)
             rows = await world.peace.list_for(code) if code else []
             lines = [f"#{r['id']}: {r['country_a']} ↔ {r['country_b']}" for r in rows]
-            await out("\n".join(lines) if lines else "پیمانی نیست.", ik([back_home()]))
+            await out("\n".join(lines) if lines else "خالی", ik([back_home()]))
             return
 
         if data == "mkt:list":
@@ -564,7 +603,10 @@ async def _on_callback(bot, world: World, callback):
             kb = []
             for r in rows[:20]:
                 meta = world._cat.get(r["item_code"], {})
-                kb.append([(f"#{r['id']} {meta.get('name_fa', r['item_code'])} ×{int(float(r['quantity']))} @ {int(float(r['unit_price'])):,}", f"mkt:buy:{r['id']}")])
+                kb.append([(
+                    f"#{r['id']} {meta.get('name_fa', r['item_code'])} ×{int(float(r['quantity']))} @{int(float(r['unit_price'])):,}",
+                    f"mkt:buy:{r['id']}",
+                )])
             kb.append(back_home())
             await out("بازار آزاد:", ik(kb) if rows else ik([back_home()]))
             return
@@ -579,12 +621,11 @@ async def _on_callback(bot, world: World, callback):
             inv = await world.inventory(code) if code else []
             kb = [[(world._cat.get(r["item_code"], {}).get("name_fa", r["item_code"]), f"mkt:sellitem:{r['item_code']}")] for r in inv[:20]]
             kb.append(back_home())
-            await out("کدام آیتم را بفروشیم؟", ik(kb) if inv else ik([back_home()]))
+            await out("کدام آیتم؟", ik(kb) if inv else ik([back_home()]))
             return
         if data.startswith("mkt:sellitem:"):
-            item = data.split(":")[-1]
-            _pending[pid] = {"kind": "mkt_qty", "item": item}
-            await out("تعداد برای فروش را بنویسید:")
+            _pending[pid] = {"kind": "mkt_qty", "item": data.split(":")[-1]}
+            await out("تعداد:")
             return
 
         if data == "leg:shop":
@@ -592,7 +633,7 @@ async def _on_callback(bot, world: World, callback):
             rows = await world.legendary.catalog()
             kb = [[(f"{r['name_fa']} — {int(float(r['price'])):,}", f"leg:buy:{r['item_code']}")] for r in rows]
             kb.append(back_home())
-            await out("✨ فروشگاه لجندری:", ik(kb))
+            await out("✨ لجندری:", ik(kb))
             return
         if data.startswith("leg:buy:"):
             try:
@@ -603,20 +644,18 @@ async def _on_callback(bot, world: World, callback):
         if data == "leg:mine":
             inv = await world.legendary.inventory(pid)
             lines = [f"• {r['item_code']}: {r['uses_left']} استفاده" for r in inv]
-            await out("\n".join(lines) if lines else "لجندری ندارید.", ik([back_home()]))
+            await out("\n".join(lines) if lines else "ندارید.", ik([back_home()]))
             return
 
         if data == "ws:home":
             code = await world.resolve_country(pid)
             if not code:
-                await out("کشور لازم است"); return
+                await out("کشور لازم است")
+                return
             st = await world.workshop.status(code)
             await out(
-                f"🏭 کارگاه\nسطح: {st['level']}\nفناوری: {st['tech_level']}\nاورانیوم بازی: {st['uranium']}",
-                ik([
-                    [("🔬 پژوهش فناوری", "ws:tech"), ("⛏ تولید منبع", "ws:uranium")],
-                    back_home(),
-                ]),
+                f"🏭 کارگاه\nسطح: {st['level']} | فناوری: {st['tech_level']} | منبع: {st['uranium']}",
+                ik([[("🔬 پژوهش", "ws:tech"), ("⛏ منبع", "ws:uranium")], back_home()]),
             )
             return
         if data == "ws:tech":
@@ -634,16 +673,18 @@ async def _on_callback(bot, world: World, callback):
 
         if data == "donate:new":
             _pending[pid] = {"kind": "donation_amount"}
-            await out("مبلغ حمایت (تومان) را بنویسید:")
+            await out("مبلغ حمایت (تومان):")
             return
         if data.startswith("don:ok:") or data.startswith("don:no:"):
             if not owner:
-                await out("فقط مالک"); return
+                await out("فقط مالک")
+                return
             did = int(data.split(":")[-1])
             ok = data.startswith("don:ok:")
             row = await world.db.fetchrow("SELECT * FROM donations WHERE id=$1", (did,))
             if not row or row["status"] != "pending":
-                await out("قبلاً بررسی شده"); return
+                await out("قبلاً بررسی شده")
+                return
             from datetime import datetime, timezone
             status = "approved" if ok else "rejected"
             await world.db.execute(
@@ -653,17 +694,16 @@ async def _on_callback(bot, world: World, callback):
             if ok:
                 total = float(await world.get_setting("donations_total", "0") or 0) + float(row["amount"])
                 await world.set_setting("donations_total", str(int(total)))
-            await out(f"{'تأیید' if ok else 'رد'} شد #{did}")
+            await out(f"{'تأیید' if ok else 'رد'} #{did}")
             return
 
         if data == "ref:enter":
             _pending[pid] = {"kind": "ref_code"}
-            await out("کد دعوت را بنویسید:")
+            await out("کد دعوت:")
             return
-
         if data == "guide:home":
             await out(
-                "📖 راهنما\n۱) کشور انتخاب کنید\n۲) از فروشگاه نیرو بخرید\n۳) اقتصاد و اتحاد بسازید\n۴) در صورت باز بودن جنگ، حمله کنید",
+                "📖 ۱) کشور انتخاب کنید\n۲) از فروشگاه نیرو بخرید\n۳) اقتصاد/اتحاد بسازید\n۴) در جنگ باز حمله کنید",
                 ik([back_home()]),
             )
             return
@@ -674,24 +714,37 @@ async def _on_callback(bot, world: World, callback):
                 await out(f"پرداخت روزانه: {n} کشور")
                 return
             if data == "own:war:1":
-                await world.set_war(True); await out("جنگ باز شد"); return
+                await world.set_war(True)
+                await out("جنگ باز شد")
+                return
             if data == "own:war:0":
-                await world.set_war(False); await out("جنگ بسته شد"); return
+                await world.set_war(False)
+                await out("جنگ بسته شد")
+                return
             if data == "own:world":
                 m = await world.db.fetchrow("SELECT * FROM world_meta WHERE id=1")
                 pc = await world.db.fetchrow("SELECT COUNT(*) AS c FROM players")
-                cc = await world.db.fetchrow("SELECT COUNT(*) AS c FROM countries WHERE owner_player_id IS NOT NULL")
-                await out(f"نسخه REBIRTH\nجنگ={m.get('war_enabled')}\nبازیکن={pc['c']}\nکشور دارای رهبر={cc['c']}")
+                cc = await world.db.fetchrow(
+                    "SELECT COUNT(*) AS c FROM countries WHERE owner_player_id IS NOT NULL"
+                )
+                await out(f"جنگ={m.get('war_enabled')}\nبازیکن={pc['c']}\nکشور دارای رهبر={cc['c']}")
                 return
             if data == "own:players":
-                rows = await world.db.fetch("SELECT player_id, username, display_name, country_code FROM players ORDER BY last_seen_at DESC LIMIT 25")
+                rows = await world.db.fetch(
+                    "SELECT player_id, username, display_name, country_code FROM players ORDER BY last_seen_at DESC LIMIT 25"
+                )
                 lines = [f"{r['player_id']} | {r.get('display_name') or r.get('username')} | {r.get('country_code')}" for r in rows]
                 await out("\n".join(lines) or "خالی")
+                return
+            if data == "own:give":
+                _pending[pid] = {"kind": "give_money"}
+                await out("فرمت: شناسه_عددی مبلغ\nمثال: 123456 5000000")
                 return
             if data == "own:donate":
                 rows = await world.db.fetch("SELECT * FROM donations WHERE status='pending' ORDER BY id DESC LIMIT 15")
                 if not rows:
-                    await out("موردی نیست"); return
+                    await out("موردی نیست")
+                    return
                 kb, lines = [], []
                 for r in rows:
                     lines.append(f"#{r['id']} {int(float(r['amount'])):,}")
@@ -700,12 +753,14 @@ async def _on_callback(bot, world: World, callback):
                 return
             if data == "own:force":
                 rows = await world.membership.list_active()
-                await out("عضویت اجباری:\n" + ("\n".join(f"{r['title']}: {r['invite_link']}" for r in rows) or "خالی"), ik([
-                    [("🗑 پاک‌سازی", "own:forceclear")], back_home()
-                ]))
+                await out(
+                    "عضویت اجباری:\n" + ("\n".join(f"{r['title']}: {r['invite_link']}" for r in rows) or "خالی"),
+                    ik([[("🗑 پاک‌سازی", "own:forceclear")], back_home()]),
+                )
                 return
             if data == "own:forceclear":
-                await out(await world.membership.clear(pid)); return
+                await out(await world.membership.clear(pid))
+                return
 
         await out("دکمه نامعتبر یا منقضی.")
     finally:

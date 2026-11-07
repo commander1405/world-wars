@@ -39,3 +39,21 @@ python main.py
 ```bash
 python -m unittest tests.test_rebirth_core -v
 ```
+
+## رفع مشکل «گیر کردن روی bot.connect»
+
+در python-bale-bot نسخه ۲.x:
+
+- متد `bot.connect()` برای دریافت پیام کافی/صحیح نیست.
+- `@bot.listen("message")` رویداد پیام را ثبت نمی‌کند؛ باید از `MessageHandler` استفاده شود.
+- چرخه صحیح: `async with bot` → `get_me()` → `updater.setup()` → fetcher → `start_polling()`.
+
+بعد از آپدیت باید این لاگ‌ها را ببینید:
+
+```
+Authentication successful bot=@...
+Update receiver started
+Polling worker running — bot is live
+```
+
+سپس در **پیوی** ربات `/start` بزنید.
