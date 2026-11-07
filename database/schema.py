@@ -205,3 +205,102 @@ SCHEMA_SQL = [
 async def apply_schema(db) -> None:
     for sql in SCHEMA_SQL:
         await db.execute(sql)
+
+# Additional REBIRTH tables
+SCHEMA_SQL.extend([
+"""CREATE TABLE IF NOT EXISTS alliance_tx (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    alliance_id INTEGER NOT NULL,
+    country_code TEXT,
+    amount REAL,
+    kind TEXT,
+    created_at TEXT
+)""",
+"""CREATE TABLE IF NOT EXISTS market_listings (
+    id INTEGER PRIMARY KEY,
+    seller_code TEXT NOT NULL,
+    seller_pid INTEGER NOT NULL,
+    item_code TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    unit_price REAL NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT
+)""",
+"""CREATE TABLE IF NOT EXISTS market_sales (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id INTEGER,
+    buyer_code TEXT,
+    buyer_pid INTEGER,
+    quantity REAL,
+    total_price REAL,
+    created_at TEXT
+)""",
+"""CREATE TABLE IF NOT EXISTS attack_cooldowns (
+    country_code TEXT PRIMARY KEY,
+    until_ts TEXT
+)""",
+"""CREATE TABLE IF NOT EXISTS defense_hits (
+    country_code TEXT PRIMARY KEY,
+    hits INTEGER NOT NULL DEFAULT 0,
+    break_at INTEGER NOT NULL DEFAULT 25
+)""",
+"""CREATE TABLE IF NOT EXISTS workshop (
+    country_code TEXT PRIMARY KEY,
+    level INTEGER NOT NULL DEFAULT 1,
+    uranium REAL NOT NULL DEFAULT 0,
+    tech_level INTEGER NOT NULL DEFAULT 0
+)""",
+"""CREATE TABLE IF NOT EXISTS workshop_jobs (
+    id INTEGER PRIMARY KEY,
+    country_code TEXT NOT NULL,
+    job_type TEXT NOT NULL,
+    progress REAL NOT NULL DEFAULT 0,
+    target REAL NOT NULL DEFAULT 100,
+    cost_paid REAL,
+    started_at TEXT,
+    finishes_at TEXT,
+    completed INTEGER NOT NULL DEFAULT 0
+)""",
+"""CREATE TABLE IF NOT EXISTS referral_codes (
+    player_id INTEGER PRIMARY KEY,
+    code TEXT UNIQUE NOT NULL,
+    created_at TEXT
+)""",
+"""CREATE TABLE IF NOT EXISTS force_membership (
+    id INTEGER PRIMARY KEY,
+    chat_id TEXT NOT NULL,
+    title TEXT,
+    invite_link TEXT,
+    active INTEGER NOT NULL DEFAULT 1
+)""",
+"""CREATE TABLE IF NOT EXISTS legendary_defs (
+    item_code TEXT PRIMARY KEY,
+    name_fa TEXT,
+    description_fa TEXT,
+    price REAL,
+    uses_per_unit INTEGER DEFAULT 20,
+    effect_type TEXT,
+    duration_sec INTEGER DEFAULT 0,
+    image_path TEXT,
+    active INTEGER DEFAULT 1
+)""",
+"""CREATE TABLE IF NOT EXISTS player_legendary (
+    id INTEGER PRIMARY KEY,
+    player_id INTEGER NOT NULL,
+    item_code TEXT NOT NULL,
+    uses_left INTEGER NOT NULL,
+    acquired_at TEXT
+)""",
+"""CREATE TABLE IF NOT EXISTS legendary_effects (
+    id INTEGER PRIMARY KEY,
+    item_code TEXT,
+    source_player INTEGER,
+    target_country TEXT,
+    effect_type TEXT,
+    expires_at TEXT,
+    meta_json TEXT
+)""",
+"""CREATE INDEX IF NOT EXISTS idx_countries_owner ON countries(owner_player_id)""",
+"""CREATE INDEX IF NOT EXISTS idx_inventory_country ON inventory(country_code)""",
+"""CREATE INDEX IF NOT EXISTS idx_market_active ON market_listings(active)""",
+])

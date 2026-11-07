@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from bale import MenuKeyboardMarkup, MenuKeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
-# Reply keyboard labels
 BTN_COUNTRY = "🌍 کشور من"
 BTN_ECO = "💰 اقتصاد و دارایی"
 BTN_BUILD = "🏗 ساخت‌وساز"
@@ -18,10 +17,11 @@ BTN_DONATE = "💎 حمایت مالی"
 BTN_OWNER = "👑 مدیریت"
 BTN_PICK = "🗺 انتخاب کشور"
 BTN_HOME = "🏠 خانه"
+BTN_REF = "🎁 دعوت دوستان"
 
 MAIN_LABELS = {
     BTN_COUNTRY, BTN_ECO, BTN_BUILD, BTN_ARMY, BTN_DIPLO, BTN_MARKET,
-    BTN_ITEMS, BTN_RANK, BTN_NEWS, BTN_SETTINGS, BTN_DONATE, BTN_OWNER, BTN_PICK, BTN_HOME,
+    BTN_ITEMS, BTN_RANK, BTN_NEWS, BTN_SETTINGS, BTN_DONATE, BTN_OWNER, BTN_PICK, BTN_HOME, BTN_REF,
     "/start", "شروع", "منو", "menu",
 }
 
@@ -34,7 +34,8 @@ def main_kb(is_owner: bool = False) -> MenuKeyboardMarkup:
         [BTN_DIPLO, BTN_MARKET],
         [BTN_ITEMS, BTN_RANK],
         [BTN_NEWS, BTN_SETTINGS],
-        [BTN_DONATE, BTN_PICK],
+        [BTN_DONATE, BTN_REF],
+        [BTN_PICK],
     ]
     if is_owner:
         rows.append([BTN_OWNER])

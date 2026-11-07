@@ -11,6 +11,14 @@ from typing import Any
 from core.errors import GameError
 from core.nav import Nav
 from modules.shop.catalog import CATALOG, CAT_FA, items_in_category
+from modules.alliances.service import AllianceService
+from modules.combat.service import CombatService
+from modules.market.service import MarketService
+from modules.peace.service import PeaceService
+from modules.referral.service import ReferralService
+from modules.membership.service import MembershipService
+from modules.legendary.service import LegendaryService
+from modules.workshop.service import WorkshopService
 
 log = logging.getLogger(__name__)
 SEED_PATH = Path(__file__).resolve().parent.parent / "data" / "countries" / "seed_ng.json"
@@ -25,6 +33,14 @@ class World:
         self.group_id = getattr(settings, "MAIN_GROUP", None)
         self.nav = Nav(db)
         self._cat = {c["item_code"]: c for c in CATALOG}
+        self.alliances = AllianceService(self)
+        self.combat = CombatService(self)
+        self.market = MarketService(self)
+        self.peace = PeaceService(self)
+        self.referral = ReferralService(self)
+        self.membership = MembershipService(self)
+        self.legendary = LegendaryService(self)
+        self.workshop = WorkshopService(self)
 
     def is_owner(self, pid: int) -> bool:
         return bool(self.owner_id and int(pid) == int(self.owner_id))
@@ -46,6 +62,10 @@ class World:
         await self._seed_countries()
         await self.ensure_un()
         await self._seed_settings()
+        try:
+            await self.legendary.ensure()
+        except Exception:
+            log.exception("legendary ensure")
         log.info("WORLD WAR REBIRTH ready owner_id=%s", self.owner_id)
 
     async def _seed_catalog(self) -> None:
